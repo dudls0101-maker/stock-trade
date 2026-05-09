@@ -30,8 +30,15 @@ import pandas as pd
 from live_config import get_configs, MAX_POSITION_PCT, MIN_ORDER_USD
 from strategies import MACrossStrategy
 from trade_log import log_line, log_trade
+from notifier import notify_signal_changes, notify_error
 
 LOOKBACK_DAYS = 400  # SMA(50/200) 같은 긴 MA를 위해 충분히 가져옴
+
+# 이벤트 수집용 (텔레그램 알림에 사용)
+EVENTS_NEW_ENTRY: list[dict] = []
+EVENTS_EXIT: list[dict] = []
+EVENTS_STOP: list[dict] = []
+EVENTS_ERROR: list[str] = []
 
 
 def load_env() -> tuple[str, str]:
@@ -202,10 +209,12 @@ def main():
             df = fetch_bars(data_client, cfg.ticker, LOOKBACK_DAYS)
         except Exception as e:
             log_line("  [ERROR] 시세 조회 실패: " + str(e))
+            EVENTS_ERROR.append(cfg.ticker + " price fetch failed: " + str(e)[:60])
             continue
 
         if df.empty:
             log_line("  [WARN] 시세 데이터 없음")
+            EVENTS_ERROR.append(cfg.ticker + " no price data")
             continue
 
         last_price = float(df["Close"].iloc[-1])
@@ -233,6 +242,10 @@ def main():
                     + "(" + str(cfg.fast) + "/" + str(cfg.slow) + ")",
                     mode=mode, est_price=last_price,
                 )
+                EVENTS_STOP.append({
+                    "ticker": cfg.ticker, "price": last_price,
+                    "system": cfg.system, "stop_pct": int(cfg.stop_loss_pct * 100),
+                })
                 continue
 
         # 시그널 vs 현재 포지션 reconcile
@@ -251,6 +264,9 @@ def main():
                 + "(" + str(cfg.fast) + "/" + str(cfg.slow) + ")",
                 mode=mode, est_price=last_price,
             )
+            EVENTS_NEW_ENTRY.append({
+                "ticker": cfg.ticker, "price": last_price, "system": cfg.system,
+            })
         elif target_signal == 0 and currently_holding:
             # 청산
             log_line("  >> 시그널 종료, 청산")
@@ -260,6 +276,9 @@ def main():
                 + "(" + str(cfg.fast) + "/" + str(cfg.slow) + ")",
                 mode=mode, est_price=last_price,
             )
+            EVENTS_EXIT.append({
+                "ticker": cfg.ticker, "price": last_price, "system": cfg.system,
+            })
         elif target_signal == 1 and currently_holding:
             log_line("  유지 (보유 계속)")
         else:
@@ -267,6 +286,29 @@ def main():
 
     log_line("\n" + "=" * 60)
     log_line("완료. mode=" + mode)
+
+    # --- 텔레그램 알림 발송 (시그널 변경 / 사고 있을 때만) ---
+    date_str = datetime.now().strftime("%Y-%m-%d (%a)")
+    total_buy = len(EVENTS_NEW_ENTRY)
+    total_exit_count = len(EVENTS_EXIT) + len(EVENTS_STOP)
+
+    if EVENTS_NEW_ENTRY or EVENTS_EXIT or EVENTS_STOP:
+        sent = notify_signal_changes(
+            date_str,
+            new_entries=EVENTS_NEW_ENTRY,
+            exits=EVENTS_EXIT,
+            stops=EVENTS_STOP,
+            total_buy=total_buy,
+            total_exit=total_exit_count,
+        )
+        log_line("[Telegram] signal alert " + ("sent" if sent else "skipped (no token)"))
+
+    if EVENTS_ERROR:
+        sent = notify_error(date_str, EVENTS_ERROR)
+        log_line("[Telegram] error alert " + ("sent" if sent else "skipped (no token)"))
+
+    if not (EVENTS_NEW_ENTRY or EVENTS_EXIT or EVENTS_STOP or EVENTS_ERROR):
+        log_line("[Telegram] no changes, no alert sent")
 
 
 if __name__ == "__main__":

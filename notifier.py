@@ -11,7 +11,6 @@ Setup:
 3. Set environment variables:
      TELEGRAM_BOT_TOKEN=<token>
      TELEGRAM_CHAT_ID=<chat_id>
-   (Or add to .env locally / GitHub Secrets for Actions)
 """
 
 from __future__ import annotations
@@ -19,7 +18,13 @@ import json
 import os
 import urllib.request
 import urllib.error
-from typing import Optional
+
+
+SYSTEM_NAMES = {
+    "C": "Index Core",
+    "A": "Big Tech",
+    "B": "Small Cap",
+}
 
 
 def _send_raw(message: str) -> bool:
@@ -27,7 +32,7 @@ def _send_raw(message: str) -> bool:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
-        return False  # silently skip if not configured
+        return False
 
     url = "https://api.telegram.org/bot" + token + "/sendMessage"
     payload = json.dumps({
@@ -47,6 +52,34 @@ def _send_raw(message: str) -> bool:
         return False
 
 
+def _format_event_table(events: list[dict], event_type: str = "entry") -> str:
+    """Format events grouped by system, monospace table."""
+    if not events:
+        return ""
+
+    by_system: dict[str, list[dict]] = {"C": [], "A": [], "B": []}
+    for e in events:
+        sys = e.get("system", "?")
+        by_system.setdefault(sys, []).append(e)
+
+    blocks = []
+    for sys in ["C", "A", "B"]:
+        items = by_system.get(sys, [])
+        if not items:
+            continue
+        block_lines = ["[" + sys + "] " + SYSTEM_NAMES.get(sys, sys)]
+        for e in items:
+            ticker = e["ticker"].ljust(6)
+            price = "${:>9,.2f}".format(e["price"])
+            extra = ""
+            if event_type == "stop":
+                extra = "  (-" + str(int(e.get("stop_pct", 7))) + "%)"
+            block_lines.append("  " + ticker + " " + price + extra)
+        blocks.append("\n".join(block_lines))
+
+    return "\n\n".join(blocks)
+
+
 def notify_signal_changes(date_str: str,
                           new_entries: list[dict],
                           exits: list[dict],
@@ -56,37 +89,35 @@ def notify_signal_changes(date_str: str,
     """
     Send signal change summary.
     Each event dict: {"ticker": str, "price": float, "system": str}
-    Only sends if there are any changes (entries/exits/stops > 0).
     """
     if not (new_entries or exits or stops):
-        return False  # nothing to report
+        return False
 
-    lines = ["<b>Auto Trader Signal Update</b>", date_str, ""]
+    parts = []
+    parts.append("<b>Auto Trader Update</b>")
+    parts.append(date_str)
+    parts.append("<i>가격은 마지막 종가 기준 (실제 체결가는 다음 개장가)</i>")
+    parts.append("")
 
     if new_entries:
-        lines.append("<b>New entries (" + str(len(new_entries)) + "):</b>")
-        for e in new_entries:
-            lines.append("  - " + e["ticker"] + " BUY @ $" + "{:.2f}".format(e["price"])
-                         + " (" + e["system"] + ")")
-        lines.append("")
+        parts.append("<b>NEW ENTRIES (" + str(len(new_entries)) + ")</b>")
+        parts.append("<pre>" + _format_event_table(new_entries, "entry") + "</pre>")
+        parts.append("")
 
     if exits:
-        lines.append("<b>Exits (" + str(len(exits)) + "):</b>")
-        for e in exits:
-            lines.append("  - " + e["ticker"] + " SELL @ $" + "{:.2f}".format(e["price"])
-                         + " (signal exit)")
-        lines.append("")
+        parts.append("<b>EXITS (" + str(len(exits)) + ")</b>")
+        parts.append("<pre>" + _format_event_table(exits, "exit") + "</pre>")
+        parts.append("")
 
     if stops:
-        lines.append("<b>Stop loss (" + str(len(stops)) + "):</b>")
-        for e in stops:
-            lines.append("  - " + e["ticker"] + " STOP @ $" + "{:.2f}".format(e["price"])
-                         + " (-" + str(int(e.get("stop_pct", 7))) + "%)")
-        lines.append("")
+        parts.append("<b>STOP LOSS (" + str(len(stops)) + ")</b>")
+        parts.append("<pre>" + _format_event_table(stops, "stop") + "</pre>")
+        parts.append("")
 
-    lines.append("Active: " + str(total_buy) + "/" + str(total_buy + total_exit) + " | Exits: " + str(total_exit))
+    parts.append("─────────────")
+    parts.append("Active <b>" + str(total_buy) + "</b>  |  Out <b>" + str(total_exit) + "</b>")
 
-    return _send_raw("\n".join(lines))
+    return _send_raw("\n".join(parts))
 
 
 def notify_error(date_str: str, error_summary: list[str]) -> bool:
@@ -94,23 +125,41 @@ def notify_error(date_str: str, error_summary: list[str]) -> bool:
     if not error_summary:
         return False
 
-    lines = ["<b>Auto Trader Errors</b>", date_str, ""]
+    parts = []
+    parts.append("<b>Auto Trader Errors</b>")
+    parts.append(date_str)
+    parts.append("")
+    parts.append("<pre>")
     for err in error_summary:
-        lines.append("  - " + err)
-    lines.append("")
-    lines.append("Will retry next scheduled run.")
+        parts.append("- " + err)
+    parts.append("</pre>")
+    parts.append("<i>Will retry next scheduled run.</i>")
 
-    return _send_raw("\n".join(lines))
+    return _send_raw("\n".join(parts))
 
 
 def notify_test() -> bool:
     """Send a test message to verify setup."""
-    return _send_raw(
-        "<b>Auto Trader connected</b>\n\n"
-        "Notifications will arrive only when:\n"
-        "  - signals change (BUY/EXIT/STOP)\n"
-        "  - operational errors occur\n\n"
-        "P&L info is never sent."
+    sample_entries = [
+        {"ticker": "SPY",  "price": 737.54, "system": "C"},
+        {"ticker": "QQQ",  "price": 711.12, "system": "C"},
+        {"ticker": "AAPL", "price": 293.15, "system": "A"},
+        {"ticker": "RDW",  "price": 11.06,  "system": "B"},
+    ]
+    sample_exits = [
+        {"ticker": "META", "price": 609.54, "system": "A"},
+    ]
+    sample_stops = [
+        {"ticker": "TMDX", "price": 60.30, "system": "B", "stop_pct": 10},
+    ]
+
+    return notify_signal_changes(
+        "TEST 2026-05-09 (Sat)",
+        new_entries=sample_entries,
+        exits=sample_exits,
+        stops=sample_stops,
+        total_buy=4,
+        total_exit=2,
     )
 
 
@@ -131,7 +180,6 @@ def _load_env_file():
 
 
 if __name__ == "__main__":
-    # Test from CLI: python notifier.py
     _load_env_file()
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -142,6 +190,6 @@ if __name__ == "__main__":
         print("  TELEGRAM_BOT_TOKEN=your_token_here")
         print("  TELEGRAM_CHAT_ID=your_chat_id_here")
     else:
-        print("\nSending test message...")
+        print("\nSending test message (with sample buy/exit/stop)...")
         ok = notify_test()
-        print("Sent OK!" if ok else "Failed (Telegram API rejected - token may be invalid)")
+        print("Sent OK!" if ok else "Failed (check token validity)")

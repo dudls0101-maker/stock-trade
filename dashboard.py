@@ -109,16 +109,17 @@ def compute_signal_and_equity(cfg):
 # UI
 # ==========================================================
 st.title("Auto Trader Dashboard")
-st.caption("Alpaca paper trading | system A: 대형주 9 + system B: 중소형주 3")
+st.caption("Alpaca paper trading | C: 인덱스 코어 (SPY/QQQ) 50% + A: 대형주 9 (35%) + B: 중소형주 3 (15%)")
 
 # Sidebar
 with st.sidebar:
     st.header("설정")
     selected_system = st.radio(
         "시스템 선택",
-        ["all", "A", "B"],
+        ["all", "C", "A", "B"],
         format_func=lambda x: {
-            "all": "전체 (A+B)",
+            "all": "전체 (C+A+B)",
+            "C": "C: 인덱스 코어 (SPY/QQQ)",
             "A": "A: 대형주",
             "B": "B: 중소형주",
         }[x],
@@ -143,8 +144,8 @@ else:
     st.warning(".env 파일에 API 키 설정 필요")
 
 # Tabs
-tab_signals, tab_positions, tab_backtest, tab_actions = st.tabs([
-    "오늘의 시그널", "Alpaca 보유 현황", "백테스트", "실행 버튼"
+tab_signals, tab_positions, tab_backtest, tab_compare, tab_actions = st.tabs([
+    "오늘의 시그널", "Alpaca 보유 현황", "백테스트", "시간단위 비교", "실행 버튼"
 ])
 
 # ----------------------- TAB 1: 시그널 -----------------------
@@ -257,15 +258,84 @@ with tab_backtest:
     except Exception as e:
         st.error("백테스트 오류: " + str(e))
 
-# ----------------------- TAB 4: 실행 버튼 -----------------------
+# ----------------------- TAB 4: 시간단위 비교 -----------------------
+with tab_compare:
+    st.subheader("일봉 vs 60분봉 종목별 비교")
+    st.caption("일봉 백테스트 (2018~2026, 8년)와 60분봉 백테스트 (최근 720일)의 결과를 비교")
+
+    with st.expander("📖 비교 방법론 — 어떻게 해석할까?", expanded=True):
+        st.markdown("""
+**핵심: B&H(매수후보유) 대비 알파로 비교한다.**
+
+같은 종목이라도 일봉 기간(8년)과 60분봉 기간(최근 2년)의 시장 환경이 다르기 때문에,
+절대 수익률을 직접 비교하면 의미 없음. 각 기간의 B&H를 기준선으로 빼서
+"가만히 들고있는 것보다 얼마나 잘했나"를 비교해야 공정함.
+
+```
+일봉 알파  = 일봉 알고리즘 - 일봉 B&H
+60분 알파 = 60분 알고리즘 - 60분 B&H
+```
+
+**3개를 같이 봐야 함**
+1. **알파 (수익률 차이)** — 얼마나 더 벌었나
+2. **MDD 차이** (B&H MDD - 알고 MDD, +면 알고가 더 잘 보호) — 얼마나 덜 깨졌나
+3. **Sharpe** (위험 대비 수익) — 알고끼리 직접 비교
+
+**Caveat 두 개 — 꼭 기억**
+- **표본 차이**: 60분봉은 yfinance 한계로 ~2년치, 일봉은 8년+. 60분봉 결과는 통계적으로
+  덜 신뢰할 수 있음. 알파가 비슷하면 일봉이 안전.
+- **거래비용**: 60분봉은 매매 빈도 5~10배. 백테스트는 수수료 0이지만 실제로는
+  spread + slippage가 알파를 깎아먹음. 일봉은 영향 거의 없음.
+
+**실전 결론**
+- 일봉이 디폴트.
+- 60분봉은 알파가 일봉보다 명확히 클 때(예: +30%p+)만 검토. 우리 데이터에선 TMDX 정도가 후보.
+- 나머지는 그냥 일봉 유지.
+        """)
+
+    compare_path = ROOT / "reports" / "timeframe_comparison.md"
+    if compare_path.exists():
+        st.markdown(compare_path.read_text(encoding="utf-8"))
+    else:
+        st.warning("timeframe_comparison.md 파일이 없습니다. run_intraday_holdings.py 실행 후 메모를 만드세요.")
+
+    st.divider()
+    st.subheader("최신 데이터로 업데이트")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("60분봉 백테스트 재실행 (보유 종목)", use_container_width=True):
+            with st.spinner("60분봉 다운로드 + 백테스트 중... (1~2분 소요)"):
+                result = subprocess.run(
+                    [sys.executable, "run_intraday_holdings.py"],
+                    cwd=ROOT, capture_output=True, text=True, timeout=300,
+                )
+                st.code(result.stdout[-3000:] + (result.stderr[-1000:] if result.stderr else ""))
+    with col2:
+        if st.button("일봉 백테스트 재실행 (보유 종목)", use_container_width=True):
+            with st.spinner("일봉 백테스트 중..."):
+                result = subprocess.run(
+                    [sys.executable, "run_holdings_backtest.py"],
+                    cwd=ROOT, capture_output=True, text=True, timeout=300,
+                )
+                st.code(result.stdout[-3000:] + (result.stderr[-1000:] if result.stderr else ""))
+
+    st.divider()
+    st.subheader("개별 리포트")
+    for fname in ["intraday_holdings_report.md", "holdings_report.md", "intraday_1h_report.md"]:
+        fp = ROOT / "reports" / fname
+        if fp.exists():
+            with st.expander("📄 " + fname):
+                st.markdown(fp.read_text(encoding="utf-8"))
+
+# ----------------------- TAB 5: Actions -----------------------
 with tab_actions:
-    st.subheader("스크립트 실행")
-    st.warning("⚠️ '실제 주문' 버튼은 Alpaca 페이퍼 계정에 진짜 주문을 넣어요. (페이퍼니까 가짜 돈)")
+    st.subheader("Script execution")
+    st.warning("Real order button sends actual orders to Alpaca paper account.")
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("백테스트 재실행", use_container_width=True):
-            with st.spinner("백테스트 실행 중..."):
+        if st.button("Re-run backtest", use_container_width=True):
+            with st.spinner("Running..."):
                 result = subprocess.run(
                     [sys.executable, "run_backtest.py"], cwd=ROOT,
                     capture_output=True, text=True, timeout=300,
@@ -274,7 +344,7 @@ with tab_actions:
 
     with col2:
         if st.button("Live Trader (Dry-run)", use_container_width=True):
-            with st.spinner("Dry-run 실행 중..."):
+            with st.spinner("Dry-run..."):
                 result = subprocess.run(
                     [sys.executable, "live_trader.py", "--system", selected_system],
                     cwd=ROOT, capture_output=True, text=True, timeout=120,
@@ -282,9 +352,9 @@ with tab_actions:
                 st.code(result.stdout[-3000:] + (result.stderr[-1000:] if result.stderr else ""))
 
     with col3:
-        confirm = st.checkbox("실제 주문 활성화 (필수 체크)")
-        if st.button("실제 페이퍼 주문 실행", use_container_width=True, disabled=not confirm):
-            with st.spinner("주문 실행 중..."):
+        confirm = st.checkbox("Real orders enabled (required)")
+        if st.button("Run real paper orders", use_container_width=True, disabled=not confirm):
+            with st.spinner("Sending orders..."):
                 result = subprocess.run(
                     [sys.executable, "live_trader.py", "--live", "--system", selected_system],
                     cwd=ROOT, capture_output=True, text=True, timeout=120,
@@ -293,11 +363,11 @@ with tab_actions:
                 get_alpaca_account.clear()
 
     st.divider()
-    st.subheader("리포트 보기")
+    st.subheader("Reports")
     reports_dir = ROOT / "reports"
     if reports_dir.exists():
-        for fname in ["backtest_report.md", "walk_forward_report.md", "holdings_report.md"]:
+        for fname in ["backtest_report.md", "walk_forward_report.md", "holdings_report.md", "longterm_report.md"]:
             fp = reports_dir / fname
             if fp.exists():
-                with st.expander("📄 " + fname):
+                with st.expander("Report: " + fname):
                     st.markdown(fp.read_text(encoding="utf-8"))

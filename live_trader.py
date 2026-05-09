@@ -151,8 +151,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true",
                         help="실제 주문 실행 (지정 안 하면 dry-run)")
-    parser.add_argument("--system", default="all", choices=["A", "B", "all"],
-                        help="A=대형주만, B=중소형주만, all=둘다 (기본)")
+    parser.add_argument("--system", default="all", choices=["C", "A", "B", "all"],
+                        help="C=인덱스 코어(SPY/QQQ), A=대형주, B=중소형주, all=전부 (기본)")
     args = parser.parse_args()
     mode = "live" if args.live else "dry"
     configs = get_configs(args.system)
